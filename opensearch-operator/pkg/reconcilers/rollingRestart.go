@@ -168,6 +168,16 @@ func (r *RollingRestartReconciler) Reconcile() (ctrl.Result, error) {
 		return ctrl.Result{}, err
 	}
 
+	// Disable replica allocation before rolling restart so the cluster
+	// doesn't waste time recovering replicas between individual pod restarts.
+	// Allocation is re-enabled by ReactivateShardAllocation when all pods are updated.
+	if !r.instance.Spec.General.DrainDataNodes {
+		if err := services.SetClusterShardAllocation(r.osClient, services.ClusterSettingsAllocationPrimaries); err != nil {
+			return ctrl.Result{Requeue: true, RequeueAfter: 10 * time.Second}, err
+		}
+		r.logger.Info("Disabled replica allocation for rolling restart")
+	}
+
 	// Use global candidate selection for rolling restart
 	return r.globalCandidateRollingRestart()
 }

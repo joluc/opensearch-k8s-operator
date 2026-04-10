@@ -222,21 +222,12 @@ func CheckClusterStatusForRestart(service *OsClusterClient, drainNodes bool) (bo
 		return false, "cluster is not green and drain nodes is enabled", nil
 	}
 
-	flatSettings, err := service.GetFlatClusterSettings()
-	if err != nil {
-		return false, "could not fetch cluster settings", err
+	// Non-drain mode: allow yellow (replicas unassigned is expected), block only on red
+	if health.Status == "yellow" {
+		return true, "", nil
 	}
 
-	if flatSettings.Transient.ClusterRoutingAllocationEnable == string(ClusterSettingsAllocationAll) {
-		return false, "waiting for health to be green", nil
-	}
-
-	// Set shard routing to all
-	if err := SetClusterShardAllocation(service, ClusterSettingsAllocationAll); err != nil {
-		return false, "failed to set shard allocation", err
-	}
-
-	return false, "enabled shard allocation", nil
+	return false, "cluster is red", nil
 }
 
 func ReactivateShardAllocation(service *OsClusterClient) error {
@@ -288,10 +279,7 @@ func PreparePodForDelete(service *OsClusterClient, lg logr.Logger, podName strin
 		lg.Info(fmt.Sprintf("Waiting for node %s to drain before deleting", podName))
 		return safeToDelete, nil
 	}
-	// Update cluster routing before deleting appropriate ordinal pod
-	if err := SetClusterShardAllocation(service, ClusterSettingsAllocationPrimaries); err != nil {
-		return false, err
-	}
+	// Non-drain: allocation already set to primaries at start of rolling restart
 	return true, nil
 }
 
