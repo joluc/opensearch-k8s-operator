@@ -90,9 +90,14 @@ var _ = Describe("OpensearchCLuster data service tests", func() {
 })*/
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/opensearch-gateway/responses"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 // TestExtractNodeName verifies that the source node name is correctly extracted from
@@ -208,5 +213,110 @@ func TestHasShardsOnNodeFromResponse(t *testing.T) {
 				t.Errorf("hasShardsOnNodeFromResponse() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// newMockOsClient creates an OsClusterClient backed by an httptest server.
+// The handler receives all HTTP requests so tests can return canned responses.
+func newMockOsClient(t *testing.T, handler http.HandlerFunc) (*OsClusterClient, *httptest.Server) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	client, err := NewOsClusterClient(srv.URL, "", "")
+	if err != nil {
+		t.Fatalf("creating mock client: %v", err)
+	}
+	return client, srv
+}
+
+func TestCheckClusterStatusForRestart(t *testing.T) {
+	tests := []struct {
+		name      string
+		health    responses.ClusterHealthResponse
+		drain     bool
+		wantReady bool
+		wantMsg   string
+	}{
+		{
+			name:      "green cluster, drain off",
+			health:    responses.ClusterHealthResponse{Status: "green"},
+			drain:     false,
+			wantReady: true,
+		},
+		{
+			name:      "green cluster, drain on",
+			health:    responses.ClusterHealthResponse{Status: "green"},
+			drain:     true,
+			wantReady: true,
+		},
+		{
+			name:      "yellow cluster, drain off - allows restart",
+			health:    responses.ClusterHealthResponse{Status: "yellow"},
+			drain:     false,
+			wantReady: true,
+		},
+		{
+			name: "yellow cluster, drain on - blocks restart",
+			health: responses.ClusterHealthResponse{
+				Status:           "yellow",
+				RelocatingShards: 1, // prevents CheckClusterRestartOnYellow from short-circuiting
+			},
+			drain:     true,
+			wantReady: false,
+			wantMsg:   "cluster is not green and drain nodes is enabled",
+		},
+		{
+			name:      "red cluster, drain off - blocks restart",
+			health:    responses.ClusterHealthResponse{Status: "red"},
+			drain:     false,
+			wantReady: false,
+			wantMsg:   "cluster is red",
+		},
+		{
+			name:      "red cluster, drain on - blocks restart",
+			health:    responses.ClusterHealthResponse{Status: "red"},
+			drain:     true,
+			wantReady: false,
+			wantMsg:   "cluster is not green and drain nodes is enabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, srv := newMockOsClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/_cluster/health":
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(tt.health)
+				default:
+					// Ping and info endpoints for client creation
+					w.Header().Set("Content-Type", "application/json")
+					fmt.Fprintf(w, `{"name":"mock","cluster_name":"mock","version":{"distribution":"opensearch","number":"2.11.0"}}`)
+				}
+			})
+			defer srv.Close()
+
+			ready, msg, err := CheckClusterStatusForRestart(client, tt.drain)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if ready != tt.wantReady {
+				t.Errorf("ready = %v, want %v", ready, tt.wantReady)
+			}
+			if msg != tt.wantMsg {
+				t.Errorf("msg = %q, want %q", msg, tt.wantMsg)
+			}
+		})
+	}
+}
+
+func TestPreparePodForDelete_NonDrain(t *testing.T) {
+	lg := log.Log.WithName("test")
+	// Non-drain path should return true immediately without calling the service
+	ready, err := PreparePodForDelete(nil, lg, "opensearch-nodes-0", false, 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ready {
+		t.Error("expected ready=true for non-drain path")
 	}
 }
