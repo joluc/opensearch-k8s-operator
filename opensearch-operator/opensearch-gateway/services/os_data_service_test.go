@@ -232,51 +232,32 @@ func TestCheckClusterStatusForRestart(t *testing.T) {
 	tests := []struct {
 		name      string
 		health    responses.ClusterHealthResponse
-		drain     bool
 		wantReady bool
 		wantMsg   string
 	}{
 		{
-			name:      "green cluster, drain off",
+			name:      "green cluster - allows restart",
 			health:    responses.ClusterHealthResponse{Status: "green"},
-			drain:     false,
 			wantReady: true,
 		},
 		{
-			name:      "green cluster, drain on",
-			health:    responses.ClusterHealthResponse{Status: "green"},
-			drain:     true,
-			wantReady: true,
-		},
-		{
-			name:      "yellow cluster, drain off - allows restart",
+			name:      "yellow cluster - allows restart",
 			health:    responses.ClusterHealthResponse{Status: "yellow"},
-			drain:     false,
 			wantReady: true,
 		},
 		{
-			name: "yellow cluster, drain on - blocks restart",
+			name: "yellow with relocating shards - allows restart",
 			health: responses.ClusterHealthResponse{
 				Status:           "yellow",
-				RelocatingShards: 1, // prevents CheckClusterRestartOnYellow from short-circuiting
+				RelocatingShards: 1,
 			},
-			drain:     true,
-			wantReady: false,
-			wantMsg:   "cluster is not green and drain nodes is enabled",
+			wantReady: true,
 		},
 		{
-			name:      "red cluster, drain off - blocks restart",
+			name:      "red cluster - blocks restart",
 			health:    responses.ClusterHealthResponse{Status: "red"},
-			drain:     false,
 			wantReady: false,
 			wantMsg:   "cluster is red",
-		},
-		{
-			name:      "red cluster, drain on - blocks restart",
-			health:    responses.ClusterHealthResponse{Status: "red"},
-			drain:     true,
-			wantReady: false,
-			wantMsg:   "cluster is not green and drain nodes is enabled",
 		},
 	}
 
@@ -295,7 +276,7 @@ func TestCheckClusterStatusForRestart(t *testing.T) {
 			})
 			defer srv.Close()
 
-			ready, msg, err := CheckClusterStatusForRestart(client, tt.drain)
+			ready, msg, err := CheckClusterStatusForRestart(client)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

@@ -193,7 +193,7 @@ func createClusterSettingsAllocationEnable(enable ClusterSettingsAllocation) res
 	}}
 }
 
-func CheckClusterStatusForRestart(service *OsClusterClient, drainNodes bool) (bool, string, error) {
+func CheckClusterStatusForRestart(service *OsClusterClient) (bool, string, error) {
 	health, err := service.GetHealth()
 	if err != nil {
 		return false, "failed to fetch health", err
@@ -218,11 +218,8 @@ func CheckClusterStatusForRestart(service *OsClusterClient, drainNodes bool) (bo
 		}
 	}
 
-	if drainNodes {
-		return false, "cluster is not green and drain nodes is enabled", nil
-	}
-
-	// Non-drain mode: allow yellow (replicas unassigned is expected), block only on red
+	// Yellow from unassigned replicas after a node restart is expected
+	// in both drain and non-drain modes. Only block on red.
 	if health.Status == "yellow" {
 		return true, "", nil
 	}
