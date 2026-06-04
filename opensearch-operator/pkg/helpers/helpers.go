@@ -392,69 +392,89 @@ func BuildGeneratedSecurityConfigSecret(k8sClient k8s.K8sClient, cr *opensearchv
 	return secret, nil
 }
 
+// applyUserHashes sets admin.hash and kibanaserver.hash on a generic map view of
+// internal_users.yml. Any other user — and any other field on admin/kibanaserver —
+// round-trips unchanged. See #1371.
 func applyUserHashes(internalUserData []byte, adminPassword []byte, adminHashOverride string, dashboardsPassword []byte, dashboardsHashOverride string) ([]byte, error) {
-	var data InternalUserConfig
+	data := map[string]any{}
 	if err := yaml.Unmarshal(internalUserData, &data); err != nil {
 		return nil, err
 	}
 
-	var adminHash string
-	if adminHashOverride != "" {
-		adminHash = adminHashOverride
-	} else {
-		hashed, err := bcrypt.GenerateFromPassword(adminPassword, 12)
-		if err != nil {
-			return nil, err
-		}
-		adminHash = string(hashed)
-	}
-	data.Admin.Hash = adminHash
-
-	if !data.Admin.Reserved {
-		data.Admin.Reserved = true
-	}
-	if len(data.Admin.BackendRoles) == 0 {
-		data.Admin.BackendRoles = []string{"admin"}
-	} else {
-		found := false
-		for _, role := range data.Admin.BackendRoles {
-			if role == "admin" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			data.Admin.BackendRoles = append(data.Admin.BackendRoles, "admin")
-		}
-	}
-
-	if data.Kibanaserver == nil {
-		data.Kibanaserver = &User{}
-	}
-
-	var dashboardsHash string
-	if dashboardsHashOverride != "" {
-		dashboardsHash = dashboardsHashOverride
-	} else {
-		hashed, err := bcrypt.GenerateFromPassword(dashboardsPassword, 12)
-		if err != nil {
-			return nil, err
-		}
-		dashboardsHash = string(hashed)
-	}
-	data.Kibanaserver.Hash = dashboardsHash
-	if !data.Kibanaserver.Reserved {
-		data.Kibanaserver.Reserved = true
-	}
-	if data.Kibanaserver.Description == "" {
-		data.Kibanaserver.Description = "Demo user for the OpenSearch Dashboards server"
-	}
-
-	modifiedYaml, err := yaml.Marshal(data)
+	adminHash, err := resolveHash(adminHashOverride, adminPassword)
 	if err != nil {
 		return nil, err
 	}
-	return modifiedYaml, nil
+	dashboardsHash, err := resolveHash(dashboardsHashOverride, dashboardsPassword)
+	if err != nil {
+		return nil, err
+	}
+
+	patchAdmin(data, adminHash)
+	patchKibanaserver(data, dashboardsHash)
+
+	return yaml.Marshal(data)
+}
+
+// resolveHash returns override if non-empty, otherwise a fresh bcrypt hash of password.
+func resolveHash(override string, password []byte) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	hashed, err := bcrypt.GenerateFromPassword(password, 12)
+	if err != nil {
+		return "", err
+	}
+	return string(hashed), nil
+}
+
+// patchAdmin sets admin.hash, forces reserved=true, and adds the "admin" backend role.
+func patchAdmin(root map[string]any, hash string) {
+	admin := userEntry(root, "admin")
+	admin["hash"] = hash
+	admin["reserved"] = true
+
+	roles := stringSlice(admin["backend_roles"])
+	if !ContainsString(roles, "admin") {
+		roles = append(roles, "admin")
+	}
+	admin["backend_roles"] = roles
+}
+
+// patchKibanaserver sets kibanaserver.hash, forces reserved=true, and fills a default description.
+func patchKibanaserver(root map[string]any, hash string) {
+	ks := userEntry(root, "kibanaserver")
+	ks["hash"] = hash
+	ks["reserved"] = true
+
+	if desc, _ := ks["description"].(string); desc == "" {
+		ks["description"] = "Demo user for the OpenSearch Dashboards server"
+	}
+}
+
+// userEntry returns root[name] as a yaml.v2 nested map, creating it if missing or malformed.
+func userEntry(root map[string]any, name string) map[any]any {
+	if existing, ok := root[name].(map[any]any); ok {
+		return existing
+	}
+	fresh := map[any]any{}
+	root[name] = fresh
+	return fresh
+}
+
+// stringSlice extracts the string elements from a yaml.v2 sequence; non-strings are dropped.
+func stringSlice(v any) []string {
+	raw, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func UsernameAndPassword(k8sClient k8s.K8sClient, cr *opensearchv1.OpenSearchCluster) (string, string, error) {

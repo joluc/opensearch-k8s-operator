@@ -4,6 +4,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	opensearchv1 "github.com/opensearch-project/opensearch-k8s-operator/opensearch-operator/api/opensearch.org/v1"
+	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v2"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -293,3 +295,143 @@ var _ = Describe("JVM Heap Size Functions", func() {
 		})
 	})
 })
+
+// Regression coverage for #1371: applyUserHashes must preserve users beyond admin and
+// kibanaserver, and any extra fields on admin/kibanaserver themselves.
+var _ = Describe("applyUserHashes", func() {
+	var (
+		adminHashOverride      string
+		dashboardsHashOverride string
+	)
+
+	BeforeEach(func() {
+		// Real bcrypt fixtures so assertions stay meaningful if hash validation is ever
+		// added to the override path.
+		ah, err := bcrypt.GenerateFromPassword([]byte("admin-pw"), bcrypt.MinCost)
+		Expect(err).ToNot(HaveOccurred())
+		adminHashOverride = string(ah)
+
+		dh, err := bcrypt.GenerateFromPassword([]byte("dashboards-pw"), bcrypt.MinCost)
+		Expect(err).ToNot(HaveOccurred())
+		dashboardsHashOverride = string(dh)
+	})
+
+	const inputWithCustomUser = `_meta:
+  type: "internalusers"
+  config_version: 2
+admin:
+  hash: "placeholder"
+  reserved: true
+  backend_roles: ["admin"]
+  description: "Admin user"
+kibanaserver:
+  hash: "placeholder"
+  reserved: true
+  description: "Demo user for the OpenSearch Dashboards server"
+dataprepper:
+  hash: "$2a$12$existingDataPrepperHashThatMustNotBeTouchedXXXXXXXXXXXXXXX"
+  reserved: false
+  hidden: false
+  backend_roles: ["ingestor"]
+  description: "Data Prepper service user"
+`
+
+	It("preserves custom users that are neither admin nor kibanaserver", func() {
+		out, err := applyUserHashes([]byte(inputWithCustomUser), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		decoded := decodeYAML(out)
+		dp, ok := decoded["dataprepper"].(map[any]any)
+		Expect(ok).To(BeTrue(), "dataprepper should still be a mapping")
+		Expect(dp["hash"]).To(Equal("$2a$12$existingDataPrepperHashThatMustNotBeTouchedXXXXXXXXXXXXXXX"))
+		Expect(dp["description"]).To(Equal("Data Prepper service user"))
+		Expect(dp["reserved"]).To(Equal(false))
+		Expect(dp["hidden"]).To(Equal(false))
+		Expect(dp["backend_roles"]).To(Equal([]any{"ingestor"}))
+	})
+
+	It("applies the admin hash override and keeps reserved/admin role invariants", func() {
+		out, err := applyUserHashes([]byte(inputWithCustomUser), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		admin := decodeYAML(out)["admin"].(map[any]any)
+		Expect(admin["hash"]).To(Equal(adminHashOverride))
+		Expect(admin["reserved"]).To(Equal(true))
+		Expect(admin["backend_roles"]).To(ContainElement("admin"))
+	})
+
+	It("applies the dashboards hash override, fills the default description, and keeps custom users", func() {
+		const stripped = `_meta:
+  type: "internalusers"
+  config_version: 2
+admin:
+  hash: "placeholder"
+kibanaserver:
+  hash: "placeholder"
+dataprepper:
+  hash: "$2a$12$existingDataPrepperHashThatMustNotBeTouchedXXXXXXXXXXXXXXX"
+  backend_roles: ["ingestor"]
+`
+		out, err := applyUserHashes([]byte(stripped), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		decoded := decodeYAML(out)
+		ks := decoded["kibanaserver"].(map[any]any)
+		Expect(ks["hash"]).To(Equal(dashboardsHashOverride))
+		Expect(ks["reserved"]).To(Equal(true))
+		Expect(ks["description"]).To(Equal("Demo user for the OpenSearch Dashboards server"))
+		Expect(decoded).To(HaveKey("dataprepper"))
+	})
+
+	It("preserves unrelated fields on the admin entry (e.g. opendistro_security_roles)", func() {
+		const richAdmin = `admin:
+  hash: "placeholder"
+  reserved: true
+  backend_roles: ["admin"]
+  opendistro_security_roles: ["all_access"]
+  attributes:
+    department: "platform"
+kibanaserver:
+  hash: "placeholder"
+`
+		out, err := applyUserHashes([]byte(richAdmin), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		admin := decodeYAML(out)["admin"].(map[any]any)
+		Expect(admin["hash"]).To(Equal(adminHashOverride))
+		Expect(admin).To(HaveKey("opendistro_security_roles"))
+		Expect(admin).To(HaveKey("attributes"))
+	})
+
+	It("adds the admin backend role when the entry has no backend_roles", func() {
+		const noRoles = `admin: {hash: "placeholder"}
+kibanaserver: {hash: "placeholder"}
+`
+		out, err := applyUserHashes([]byte(noRoles), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		admin := decodeYAML(out)["admin"].(map[any]any)
+		Expect(admin["backend_roles"]).To(Equal([]any{"admin"}))
+	})
+
+	It("does not duplicate the admin backend role when it is already present", func() {
+		const alreadyHasRole = `admin:
+  hash: "placeholder"
+  backend_roles: ["admin", "ops"]
+kibanaserver:
+  hash: "placeholder"
+`
+		out, err := applyUserHashes([]byte(alreadyHasRole), nil, adminHashOverride, nil, dashboardsHashOverride)
+		Expect(err).ToNot(HaveOccurred())
+
+		admin := decodeYAML(out)["admin"].(map[any]any)
+		Expect(admin["backend_roles"]).To(ConsistOf("admin", "ops"))
+	})
+})
+
+// decodeYAML unmarshals a yaml.v2 document into a generic map for assertions.
+func decodeYAML(b []byte) map[string]any {
+	out := map[string]any{}
+	ExpectWithOffset(1, yaml.Unmarshal(b, &out)).To(Succeed())
+	return out
+}
