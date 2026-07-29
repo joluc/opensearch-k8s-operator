@@ -30,6 +30,33 @@ func newTLSReconciler(k8sClient *k8s.MockK8sClient, spec *opensearchv1.OpenSearc
 	return &reconcilerContext, underTest
 }
 
+func externalTLSCluster(clusterName, version string, adminDn []string) opensearchv1.OpenSearchCluster {
+	return opensearchv1.OpenSearchCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: clusterName, Namespace: clusterName, UID: "dummyuid"},
+		Spec: opensearchv1.ClusterSpec{General: opensearchv1.GeneralConfig{Version: version}, Security: &opensearchv1.Security{
+			Tls: &opensearchv1.TlsConfig{
+				Transport: &opensearchv1.TlsConfigTransport{
+					Generate: false,
+					TlsCertificateConfig: opensearchv1.TlsCertificateConfig{
+						Secret: corev1.LocalObjectReference{Name: "cert-transport"},
+					},
+					NodesDn: []string{"CN=mycn"},
+				},
+				Http: &opensearchv1.TlsConfigHttp{
+					Generate: false,
+					TlsCertificateConfig: opensearchv1.TlsCertificateConfig{
+						Secret: corev1.LocalObjectReference{Name: "cert-http"},
+					},
+					AdminDn: adminDn,
+				},
+			},
+			Config: &opensearchv1.SecurityConfig{
+				AdminSecret: corev1.LocalObjectReference{Name: "admin-cert"},
+			},
+		}},
+	}
+}
+
 var _ = Describe("TLS Controller", func() {
 
 	Context("When Reconciling the TLS configuration with no existing secrets", func() {
@@ -212,6 +239,33 @@ var _ = Describe("TLS Controller", func() {
 			value, exists = reconcilerContext.OpenSearchConfig["plugins.security.authcz.admin_dn"]
 			Expect(exists).To(BeTrue())
 			Expect(value).To(Equal("[\"CN=admin,OU=" + clusterName + "\"]"))
+		})
+
+		It("Should render configured admin DNs for prerelease versions when an admin secret is provided", func() {
+			clusterName := "tls-test-existing-admin-secret"
+			spec := externalTLSCluster(clusterName, "3.0.0-alpha", []string{"CN=admin1", "CN=admin2"})
+
+			mockClient := k8s.NewMockK8sClient(GinkgoT())
+			reconcilerContext, underTest := newTLSReconciler(mockClient, &spec)
+			_, err := underTest.Reconcile()
+			Expect(err).ToNot(HaveOccurred())
+
+			value, exists := reconcilerContext.OpenSearchConfig["plugins.security.authcz.admin_dn"]
+			Expect(exists).To(BeTrue())
+			Expect(value).To(Equal("[\"CN=admin1\",\"CN=admin2\"]"))
+		})
+
+		It("Should omit admin DNs when an admin secret is provided without configured admin DNs", func() {
+			clusterName := "tls-test-empty-admin-dn"
+			spec := externalTLSCluster(clusterName, "2.8.0", nil)
+
+			mockClient := k8s.NewMockK8sClient(GinkgoT())
+			reconcilerContext, underTest := newTLSReconciler(mockClient, &spec)
+			_, err := underTest.Reconcile()
+			Expect(err).ToNot(HaveOccurred())
+
+			_, exists := reconcilerContext.OpenSearchConfig["plugins.security.authcz.admin_dn"]
+			Expect(exists).To(BeFalse())
 		})
 	})
 

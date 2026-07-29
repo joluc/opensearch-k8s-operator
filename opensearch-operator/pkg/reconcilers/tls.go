@@ -167,6 +167,7 @@ func (r *TLSReconciler) handleAdminCertificate() (*ctrl.Result, error) {
 
 	var res *ctrl.Result
 	var certDN string
+	var adminDnField string
 	var shouldGenerate bool
 
 	if r.instance.Spec.Security.Config != nil && r.instance.Spec.Security.Config.AdminSecret.Name != "" {
@@ -177,6 +178,7 @@ func (r *TLSReconciler) handleAdminCertificate() (*ctrl.Result, error) {
 
 	if helpers.SecurityChangeVersion(r.instance) {
 		tlsConfig := r.instance.Spec.Security.Tls.Http
+		adminDnField = "spec.security.tls.http.adminDn"
 		if shouldGenerate {
 			ca, err := r.getReferencedCaCertOrDefault(r.adminCAConfig())
 			if err != nil {
@@ -193,6 +195,7 @@ func (r *TLSReconciler) handleAdminCertificate() (*ctrl.Result, error) {
 		}
 	} else {
 		tlsConfig := r.instance.Spec.Security.Tls.Transport
+		adminDnField = "spec.security.tls.transport.adminDn"
 		if shouldGenerate {
 			ca, err := r.getReferencedCaCertOrDefault(r.adminCAConfig())
 			if err != nil {
@@ -207,6 +210,16 @@ func (r *TLSReconciler) handleAdminCertificate() (*ctrl.Result, error) {
 		} else {
 			certDN = strings.Join(tlsConfig.AdminDn, "\",\"") //nolint:staticcheck
 		}
+	}
+
+	if certDN == "" {
+		message := fmt.Sprintf(
+			"%s is empty but an admin secret is configured; plugins.security.authcz.admin_dn will not be set. Set %s to the admin certificate DN.",
+			adminDnField,
+			adminDnField,
+		)
+		r.reconcilerContext.recorder.Event(r.instance, "Warning", "Security", message)
+		return res, nil
 	}
 
 	r.reconcilerContext.AddConfig("plugins.security.authcz.admin_dn", fmt.Sprintf("[\"%s\"]", certDN))

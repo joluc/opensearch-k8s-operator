@@ -114,7 +114,7 @@ func CheckVersionConstraint(cluster *opensearchv1.OpenSearchCluster, constraint 
 func SecurityChangeVersion(cluster *opensearchv1.OpenSearchCluster) bool {
 	return CheckVersionConstraint(
 		cluster,
-		">=2.0.0",
+		">=2.0.0-0",
 		true,
 		"unable to parse version, assuming >= 2.0.0",
 	)

@@ -294,6 +294,18 @@ var _ = Describe("JVM Heap Size Functions", func() {
 	})
 })
 
+var _ = Describe("SecurityChangeVersion", func() {
+	It("should treat OpenSearch prerelease versions newer than 2.x as security-change versions", func() {
+		cluster := &opensearchv1.OpenSearchCluster{
+			Spec: opensearchv1.ClusterSpec{
+				General: opensearchv1.GeneralConfig{Version: "3.0.0-alpha"},
+			},
+		}
+
+		Expect(SecurityChangeVersion(cluster)).To(BeTrue())
+	})
+})
+
 var _ = Describe("TlsCASecretRef", func() {
 	It("should return HTTP caSecret for OpenSearch 2.x", func() {
 		cluster := &opensearchv1.OpenSearchCluster{
